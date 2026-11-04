@@ -67101,7 +67101,7 @@ Are you sure you want to enable it?]])
 									p.Material = Enum.Material.Plastic
 									p.Reflectance = 0
 								end
-							elseif (P == "Decal" or P == "Texture") and p.Texture ~= "rbxassetid://3581259086" and not p:IsDescendantOf(L) and not p:IsDescendantOf(y) and (not state.hive or not p:IsDescendantOf(state.hive)) and (not o or not p:IsDescendantOf(o)) and not p:IsDescendantOf(Z) then
+							elseif (P == "Decal" or P == "Texture") and not p:IsDescendantOf(workspace.Bees) and p.Texture ~= "rbxassetid://3581259086" and not p:IsDescendantOf(L) and not p:IsDescendantOf(y) and (not state.hive or not p:IsDescendantOf(state.hive)) and (not o or not p:IsDescendantOf(o)) and not p:IsDescendantOf(Z) then
 								p:Destroy()
 							elseif P == "ParticleEmitter" and p.Name ~= "PuffshroomSpores" and not p:IsDescendantOf(Z) then
 								p:Destroy()
