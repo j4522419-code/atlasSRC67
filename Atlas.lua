@@ -1,8 +1,19 @@
-local function startAtlas(reload)
-if _G.loading or (_G.atlas and not reload) then return end
+local function startAtlas()
+if _G.loading then return warn("Atlas startup is already in progress") end
 _G.loading = true
 local ownedGui
 local ok, problem = xpcall(function()
+local previousGui = _G.atlas
+if previousGui then
+	previousGui:Destroy()
+	local deadline = os.clock() + 3
+	while _G.atlas == previousGui do
+		if os.clock() >= deadline then
+			error("Previous Atlas did not finish unloading")
+		end
+		task.wait()
+	end
+end
 if not getthreadidentity or getthreadidentity()<8 then return(cloneref and cloneref(game:GetService("StarterGui")) or game:GetService("StarterGui")):SetCore("SendNotification",{Title="Warning",Text="Your executor is not supported.",Duration=10})end
 
 
@@ -1517,15 +1528,6 @@ end
 
 local ui = {}
 local uiParts = {}
-
-if _G.atlas then
-	_G.atlas:Destroy()
-	local now = os.clock()
-
-	while not (not _G.atlas or not (os.clock() - now < 3)) do
-		RunService.Heartbeat:Wait()
-	end
-end
 
 local ScreenGui = Instance.new("ScreenGui")
 local mobileToggleButton, controls, currentField, position, currentFieldName, vector, availableFields, setField, getFieldAt, isPathClear
@@ -67725,4 +67727,4 @@ _G.loading = nil
 if not ok then warn(problem) end
 end
 
-startAtlas(false)
+startAtlas()
