@@ -1,10 +1,11 @@
 local function startAtlas()
 if _G.loading then return warn("Atlas startup is already in progress") end
 _G.loading = true
-local ownedGui
+local ownedGui, cleanup
 local ok, problem = xpcall(function()
 local previousGui = _G.atlas
 if previousGui then
+	if type(_G.atlasUnload) == "function" then _G.atlasUnload(previousGui) end
 	previousGui:Destroy()
 	local deadline = os.clock() + 3
 	while _G.atlas == previousGui do
@@ -135,6 +136,40 @@ local playerGui = localPlayer:WaitForChild("PlayerGui", 30)
 local coreStats = localPlayer:WaitForChild("CoreStats", 30)
 if not playerGui or not coreStats or not coreStats:WaitForChild("Honey", 30) then
 	error("Player data did not load within the startup timeout")
+end
+local function gameGui(...)
+	local deadline = os.clock() + 45
+	repeat
+		local gui = playerGui:FindFirstChild("ScreenGui")
+		if not gui or not gui:IsA("ScreenGui") or not (gui:FindFirstChild("MeterHUD") or gui:FindFirstChild("ActivateButton")) then
+			gui = nil
+			for _, candidate in ipairs(playerGui:GetChildren()) do
+				if candidate:IsA("ScreenGui") and (candidate:FindFirstChild("MeterHUD") or candidate:FindFirstChild("ActivateButton")) then
+					gui = candidate
+					break
+				end
+			end
+		end
+		for i = 1, select("#", ...) do
+			if not gui then break end
+			local name = select(i, ...)
+			gui = gui:FindFirstChild(name)
+		end
+		if gui then return gui end
+		task.wait(0.1)
+	until os.clock() >= deadline
+	error("Bee Swarm UI did not load: PlayerGui > game HUD > " .. table.concat({...}, " > "))
+end
+
+-- The player data can replicate before the game has built its HUD and world folders.
+gameGui("PlayerActivesGui")
+do
+	local deadline = os.clock() + 45
+	for _, name in ipairs({"Toys", "Planters", "Monsters", "Particles", "FlowerZones", "ServerTime"}) do
+		if not workspace:WaitForChild(name, math.max(0, deadline - os.clock())) then
+			error("Bee Swarm world did not load: Workspace." .. name)
+		end
+	end
 end
 if identifyexecutor then
 	print(identifyexecutor())
@@ -761,29 +796,31 @@ local questData = nil
 local questTasks = {}
 local input = {}
 local logger = {}
-local monsterSpawners = {}
+local monsterSpawners = setmetatable({}, {
+	__index = function(spawners, name)
+		local folder = workspace:FindFirstChild("MonsterSpawners")
+		local part = folder and name and folder:FindFirstChild(name)
+		local kind = part and part:FindFirstChild("MonsterType")
+		if part and part:IsA("BasePart") and kind and kind:IsA("StringValue") then
+			local spawner = { MonsterType = kind.Value, Position = part.Position, Name = name }
+			rawset(spawners, name, spawner)
+			return spawner
+		end
+	end,
+})
 local gameApi = {}
 
-for _, child in ipairs(workspace.MonsterSpawners:GetChildren()) do
-	monsterSpawners[child.Name] = { MonsterType = child.MonsterType.Value, Position = child.Position, Name = child.Name }
-end
-
 local function isSpawnerTimerVisible(spawner)
+	local folder = workspace:FindFirstChild("MonsterSpawners")
+	if not folder then return false end
 	local label = spawner.timer
-	if not label or not label:IsDescendantOf(workspace.MonsterSpawners) then
-		local part = workspace.MonsterSpawners:FindFirstChild(spawner.Name)
+	if not label or not label:IsDescendantOf(folder) then
+		local part = folder:FindFirstChild(spawner.Name)
 		label = part and part:FindFirstChild("TimerLabel", true)
 		spawner.timer = label
 	end
 	return label ~= nil and label:IsA("GuiObject") and label.Visible
 end
-
-local gameGui = {
-	RBChallenge = localPlayer.PlayerGui.ScreenGui.ChallengeInfo.RBChallengeInfo,
-	ActivateButton = localPlayer.PlayerGui.ScreenGui.ActivateButton,
-	MinigameLayer = localPlayer.PlayerGui.ScreenGui.MinigameLayer,
-	Dialog = localPlayer.PlayerGui.ScreenGui.NPC,
-}
 
 local planterInfo = {
 	["Paper Planter"] = 1,
@@ -1098,10 +1135,14 @@ local locations = {
 	Ace = Vector3.new(-487, 70, 1),
 }
 
-httprequest = function(requestOptions, v25)
+local function httprequest(requestOptions, v25)
 	local ok, result = pcall(http_request, requestOptions)
 
-	if not ok or not (not result.Success or not (result.StatusCode == 200 or result.StatusCode == 204)) then
+	if ok and type(result) ~= "table" then
+		logger.warn(v25, "No HTTP response")
+		return
+	end
+	if not ok or (result.Success and result.StatusCode >= 200 and result.StatusCode < 300) then
 		if ok then
 			return result.Body
 		end
@@ -1114,10 +1155,10 @@ httprequest = function(requestOptions, v25)
 	end
 end
 
-stopMovement = function()
+local function stopMovement()
 	local humanoid = getHumanoid()
 
-	if humanoid.health ~= 0 then
+	if humanoid.Health ~= 0 then
 		local rootPart = getRootPart()
 		humanoid:MoveTo(rootPart.Position)
 
@@ -1156,9 +1197,8 @@ gameApi.SetupSecureCall = function()
 			threadCount += 1
 
 			threads.list[threadCount] = task.spawn(function(...)
-				setthreadidentity(5)
-
 				Z, p = pcall(function(...)
+					setthreadidentity(5)
 					return table.pack(n(...))
 				end, ...)
 
@@ -1173,7 +1213,7 @@ gameApi.SetupSecureCall = function()
 				error(p)
 			end
 
-			return table.unpack(p)
+			return table.unpack(p, 1, p.n)
 		end)
 	end
 end
@@ -1214,8 +1254,8 @@ gameApi.Setup = function(api)
 		error("debug.getupvalue failed")
 	end
 
-	if not getconnections(gameGui.Dialog.ButtonOverlay.MouseButton1Click)[1].Function then
-		error("getconnections failed")
+	if type(getconnections) ~= "function" then
+		error("Executor is missing getconnections")
 	end
 end
 
@@ -1378,6 +1418,18 @@ local function distanceTo(target, flat)
 	end
 
 	return (position - (vector or target)).magnitude
+end
+
+local function preferGroup(group, current)
+	if #group ~= #current then return #group > #current end
+	local function closest(parts)
+		local best = math.huge
+		for _, part in ipairs(parts) do
+			best = math.min(best, distanceTo(part.Position, true))
+		end
+		return best
+	end
+	return closest(group) < closest(current)
 end
 
 local function findMatch(list, text, byKey)
@@ -1543,6 +1595,25 @@ do
 	ScreenGui.Parent = gethui and gethui() or getService("CoreGui")
 	ownedGui = ScreenGui
 	_G.atlas = ScreenGui
+	local cleaned = false
+	cleanup = function()
+		if cleaned then return end
+		cleaned = true
+		connections:CancelAll()
+		threads:CancelAll()
+		if ui.onUnload then
+			local done, reason = pcall(ui.onUnload)
+			if not done then warn(reason) end
+		end
+		if _G.atlas == ScreenGui then
+			_G.atlas = nil
+			_G.atlasUnload = nil
+		end
+	end
+	_G.atlasUnload = function(gui)
+		if gui == ScreenGui then cleanup() end
+	end
+	ScreenGui.Destroying:Connect(cleanup)
 	local visible = true
 	local fieldClones = {}
 	local vector2 = Vector2.new(450, 280)
@@ -3619,7 +3690,7 @@ do
 					end
 
 					v79 = measuredHeight
-					TweenService:Create(clone4, TweenInfo.new(0, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { Size = v76 and UDim2.new(1, 0, 0, measuredHeight) or v }):Play()
+					TweenService:Create(clone4, TweenInfo.new(0, Enum.EasingStyle.Linear, Enum.EasingDirection.In), { Size = v76 and UDim2.new(1, 0, 0, measuredHeight) or UDim2.new(1, 0, 0, 23) }):Play()
 				end
 			end
 
@@ -3888,7 +3959,7 @@ do
 					switch2.Text = alwaysDelete and utf8.char(10003) or ""
 
 					if not itemConfig then
-						bqbuyconf[itemName] = { false, current, alwaysDelete }
+						bqbuyconf[itemName] = { false, 1, alwaysDelete }
 						itemConfig = bqbuyconf[itemName]
 					else
 						itemConfig[3] = alwaysDelete
@@ -5430,7 +5501,9 @@ do
 		end
 
 		connections:Add("collectibles", workspace.Collectibles.ChildAdded:Connect(function(n)
-			local u = n.FrontDecal.Texture
+			local decal = n:FindFirstChild("FrontDecal") or n:WaitForChild("FrontDecal", 3)
+			if not decal or not n.Parent or not tracked then return end
+			local u = decal.Texture
 
 			if cfg.detected.fastraretween and not state.stop and not state.fasttween and not state.stopfasttween and (state.rares[string.match(u, "%d+")] or state.rares.Sticker and n:FindFirstChild("Spots")) then
 				v69(n.Position)
@@ -5456,7 +5529,7 @@ do
 		["rbxassetid://2314214749"] = "stinger",
 	}
 
-	for _, child in ipairs(localPlayer.PlayerGui.ScreenGui.PlayerActivesGui:GetChildren()) do
+	for _, child in ipairs(gameGui("PlayerActivesGui"):GetChildren()) do
 		threadCount += 1
 
 		connections:Add(threadCount, child.ChildAdded:Connect(function(n)
@@ -5492,54 +5565,40 @@ do
 		end
 	end
 
-	connections:Add("planters", workspace.Planters.ChildAdded:Connect(function(child)
-		if child.Name == "PlanterBulb" then
-			if child:FindFirstChild("Gui Attach") then
-				local textLabel = child["Gui Attach"]["Planter Gui"].Bar.TextLabel
-
-				table.insert(tracked.planters, {
-					field = getFieldAt(child.Position).Name,
-					position = child.Position,
-					name = string.match(textLabel.Text, "(.+)%s%("),
-					puffshrooms = child.PuffshroomSpores,
-					percent = child.GrowthPercent,
-					textLabel = textLabel,
-				})
+	do
+		local folder = workspace.Planters
+		local function trackPlanter(child)
+			if child.Name ~= "PlanterBulb" or not child:IsA("BasePart") then return end
+			local attachment = child:FindFirstChild("Gui Attach")
+			local gui = attachment and attachment:FindFirstChild("Planter Gui")
+			local bar = gui and gui:FindFirstChild("Bar")
+			local label = bar and bar:FindFirstChild("TextLabel")
+			local percent = child:FindFirstChild("GrowthPercent")
+			local field = getFieldAt(child.Position)
+			local name = label and string.match(label.Text, "(.+)%s%(")
+			if not name or not percent or not field then return end
+			for _, entry in ipairs(tracked.planters) do
+				if entry.bulb == child then return end
 			end
+			table.insert(tracked.planters, {
+				bulb = child, field = field.Name, position = child.Position,
+				name = name, puffshrooms = child:FindFirstChild("PuffshroomSpores"),
+				percent = percent, textLabel = label,
+			})
 		end
-	end))
-
-	connections:Add("planters2", workspace.Planters.ChildRemoved:Connect(function(child)
-		if child.Name == "PlanterBulb" then
-			if child:FindFirstChild("Gui Attach") then
-				local planterName = string.match(child["Gui Attach"]["Planter Gui"].Bar.TextLabel.Text, "(.+)%s%(")
-
-				for i, planter in ipairs(tracked.planters) do
-					if planter.name == planterName then
-						table.remove(tracked.planters, i)
-						break
-					end
+		connections:Add("planters", folder.DescendantAdded:Connect(function(part)
+			while part and part.Parent ~= folder do part = part.Parent end
+			if part then trackPlanter(part) end
+		end))
+		connections:Add("planters2", folder.ChildRemoved:Connect(function(child)
+			for i, entry in ipairs(tracked.planters) do
+				if entry.bulb == child then
+					table.remove(tracked.planters, i)
+					break
 				end
 			end
-		end
-	end))
-
-	for _, child in ipairs(workspace.Planters:GetChildren()) do
-		if not (child.Name ~= "PlanterBulb" or not child:FindFirstChild("Gui Attach")) then
-			local textLabel = child["Gui Attach"]["Planter Gui"].Bar.TextLabel
-			local field = getFieldAt(child.Position)
-
-			if field then
-				table.insert(tracked.planters, {
-					field = field.Name,
-					position = child.Position,
-					name = string.match(textLabel.Text, "(.+)%s%("),
-					puffshrooms = child.PuffshroomSpores,
-					percent = child.GrowthPercent,
-					textLabel = textLabel,
-				})
-			end
-		end
+		end))
+		for _, child in ipairs(folder:GetChildren()) do trackPlanter(child) end
 	end
 
 	do
@@ -5615,9 +5674,7 @@ do
 					local matched = nil
 
 					for k, mobTable in pairs(mobTrackers) do
-						UIPadding2 = k
-
-						if string.find(name, UIPadding2, 1, true) then
+						if string.find(name, k, 1, true) then
 							mobTable[child] = true
 							matched = true
 							break
@@ -5911,10 +5968,11 @@ do
 			end
 
 			connections:Add("dupedtokens", DupedTokens.ChildAdded:Connect(function(child)
-				local FrontDecal = child:FindFirstChild("FrontDecal")
+				local FrontDecal = child:FindFirstChild("FrontDecal") or child:WaitForChild("FrontDecal", 3)
+				if not FrontDecal or child.Parent ~= DupedTokens or not tracked then return end
 
-				if not FrontDecal or not (FrontDecal.Texture == "rbxassetid://1472425802" or FrontDecal.Texture == "rbxassetid://1472580249" or FrontDecal.Texture == "rbxassetid://1472532912" or FrontDecal.Texture == "rbxassetid://2032949183" or FrontDecal.Texture == "rbxassetid://1472491940" or FrontDecal.Texture == "rbxassetid://1489734171" or FrontDecal.Texture == "rbxassetid://1837410537") then
-					if not FrontDecal or FrontDecal.Texture ~= "http://www.roblox.com/asset/?id=5877939956" then
+				if not (FrontDecal.Texture == "rbxassetid://1472425802" or FrontDecal.Texture == "rbxassetid://1472580249" or FrontDecal.Texture == "rbxassetid://1472532912" or FrontDecal.Texture == "rbxassetid://2032949183" or FrontDecal.Texture == "rbxassetid://1472491940" or FrontDecal.Texture == "rbxassetid://1489734171" or FrontDecal.Texture == "rbxassetid://1837410537") then
+					if FrontDecal.Texture ~= "http://www.roblox.com/asset/?id=5877939956" then
 						tracked.dupedtokens[child] = { decal = FrontDecal, time = os.clock() }
 					else
 						tracked.dupedsmiley[child] = os.clock()
@@ -5990,7 +6048,7 @@ do
 
 	watchAlerts = function(enable)
 		if not (not enable or connections:Get("alert")) then
-			connections:Add("alert", localPlayer.PlayerGui.ScreenGui.Alerts.ChildAdded:Connect(function(child)
+			connections:Add("alert", gameGui("Alerts").ChildAdded:Connect(function(child)
 				RunService.Heartbeat:Wait()
 				local text = child.Text
 
@@ -6333,7 +6391,7 @@ do
 end
 
 input.getButtonPosition = function(button)
-	local absolutePos = button.AbsolutePosition + (localPlayer.PlayerGui.ScreenGui.AbsolutePosition - ScreenGui.AbsolutePosition) + button.AbsoluteSize / 2
+	local absolutePos = button.AbsolutePosition + (gameGui().AbsolutePosition - ScreenGui.AbsolutePosition) + button.AbsoluteSize / 2
 	return absolutePos.X, absolutePos.Y
 end
 
@@ -6349,7 +6407,7 @@ end
 
 input.pressActivateButton = function(owner, shouldPress, throwIfBlocked)
 	waitForLanding()
-	local activateButton = gameGui.ActivateButton
+	local activateButton = gameGui("ActivateButton")
 	local now = os.clock()
 
 	while not (not (activateButton.Position.Y.Offset < 0) or not (os.clock() - now < 2)) do
@@ -6397,7 +6455,7 @@ input.open = function(owner, menu, menuName, apiName, apiArg)
 end
 
 input.questionBox = function(owner, answerYes, timeout)
-	local questionBox = localPlayer.PlayerGui.ScreenGui.QuestionBox
+	local questionBox = gameGui("QuestionBox")
 	local now = os.clock()
 
 	while not questionBox.Visible and os.clock() - now < timeout do
@@ -6430,7 +6488,7 @@ input.handleShiftLock = function(owner)
 end
 
 input.closeEggMenu = function(owner)
-	local menus = localPlayer.PlayerGui.ScreenGui.Menus
+	local menus = gameGui("Menus")
 	local content = menus.Children.Eggs.Content
 
 	if content:FindFirstChild("EggRows") then
@@ -6573,6 +6631,7 @@ end
 local mobCooldown
 
 mobCooldown = function(spawner, asText)
+	if not spawner then return asText and "Unavailable" or true end
 	if not getTimer(spawner.Name) then
 		local respawnDelay = 20
 
@@ -6758,7 +6817,9 @@ local function findPath(from, to, useCannon, nodes, links)
 	end
 
 	local raycastParams = RaycastParams.new()
-	raycastParams.FilterDescendantsInstances = { workspace.Map, filterList, workspace.Gates }
+	table.insert(filterList, workspace.Map)
+	table.insert(filterList, workspace.Gates)
+	raycastParams.FilterDescendantsInstances = filterList
 	raycastParams.FilterType = Enum.RaycastFilterType.Include
 
 	for k, nodePosition in pairs(nodePositions) do
@@ -36637,7 +36698,6 @@ do
 		[1279] = { [2897] = "Jump1" },
 	}
 
-	removelinks = { 3258, 3259, 3260 }
 
 	pathNodes = {
 		Vector3.new(47, 30, 479),
@@ -40217,9 +40277,10 @@ do
 			["http://www.roblox.com/asset/?id=3835712489"] = "Pepper Patch",
 		}
 
+		gameGui("TileGrid")
 		local buffIcons = {}
 
-		for _, child in ipairs(localPlayer.PlayerGui.ScreenGui:GetChildren()) do
+		for _, child in ipairs(gameGui():GetChildren()) do
 			if child.Name == "TileGrid" then
 				table.insert(buffIcons, child)
 			end
@@ -40356,10 +40417,10 @@ do
 							local windField = fieldByImage[image]
 							local tonumber_ = tonumber
 							local amountText = string.gsub(child.BG.Text.Text, "x", "")
-							winds[windField] = tonumber_(amountText) or 1
+							if windField then winds[windField] = tonumber_(amountText) or 1 end
 						end
 					else
-						buffs.Fields[fieldByImage[image]] = { Text = child.BG.Text, Percent = child.BG.Bar }
+						if fieldByImage[image] then buffs.Fields[fieldByImage[image]] = { Text = child.BG.Text, Percent = child.BG.Bar } end
 					end
 				end
 			end
@@ -40432,10 +40493,10 @@ do
 						buffs.Nectar[nectarKey] = nil
 					elseif child.BG.Bar.BackgroundColor3 ~= Color3.fromRGB(255, 228, 81) then
 						if child.BG.Bar.BackgroundColor3 == Color3.fromRGB(231, 248, 255) then
-							buffs.Winds[fieldByImage[image]] = nil
+							if fieldByImage[image] then buffs.Winds[fieldByImage[image]] = nil end
 						end
 					else
-						buffs.Fields[fieldByImage[image]] = nil
+						if fieldByImage[image] then buffs.Fields[fieldByImage[image]] = nil end
 					end
 				end
 			end
@@ -42102,7 +42163,7 @@ do
 			local function ready()
 				local deadline = os.clock() + 4
 				repeat
-					if not gameFrame.Parent or not gameFrame.Visible or not gameGui.MinigameLayer.Visible or matchGame.Finished or not matchGame.Grid then return false end
+					if not gameFrame.Parent or not gameFrame.Visible or not gameGui("MinigameLayer").Visible or matchGame.Finished or not matchGame.Grid then return false end
 					if matchGame.Grid.InputActive then return true end
 					RunService.Heartbeat:Wait()
 				until os.clock() >= deadline
@@ -42176,7 +42237,7 @@ do
 
 			local now2 = os.clock()
 
-			while not (not gameGui.MinigameLayer.Visible or not (os.clock() - now2 < 6)) do
+			while not (not gameGui("MinigameLayer").Visible or not (os.clock() - now2 < 6)) do
 				RunService.Heartbeat:Wait()
 			end
 
@@ -42189,7 +42250,7 @@ function memoryMatch:playVisibleBoard(timeout)
 	local ok, problem = pcall(function()
 		local deadline = os.clock() + timeout
 		repeat
-			local layer = gameGui.MinigameLayer
+			local layer = gameGui("MinigameLayer")
 			if layer.Visible then
 				for _, frame in ipairs(layer:GetChildren()) do
 					local grid = frame:FindFirstChild("GuiGrid")
@@ -42234,7 +42295,7 @@ end
 		local function amuletMatches(modConfig, amuletTitle)
 			local popupLines = {}
 
-			for match in string.gmatch(localPlayer.PlayerGui.ScreenGui.RewardsPopUp.AmuletFrame.InfoNew.Text, "[^\r\n]+") do
+			for match in string.gmatch(gameGui("RewardsPopUp", "AmuletFrame", "InfoNew").Text, "[^\r\n]+") do
 				table.insert(popupLines, match)
 			end
 
@@ -42339,7 +42400,7 @@ end
 		end
 
 		handleAmuletPopup = function(blockingGui)
-			local rewardsPopUp = localPlayer.PlayerGui.ScreenGui.RewardsPopUp
+			local rewardsPopUp = gameGui("RewardsPopUp")
 			local text = rewardsPopUp.AmuletFrame.Title.Text
 			local amuletKind = cfg.amulet.ant and string.find(text, "Ant Amulet") ~= nil and "ant" or cfg.amulet.kb and string.find(text, "King Beetle Amulet") ~= nil and "kb" or cfg.amulet.rbc and string.find(text, "Cog Amulet") ~= nil and "rbc" or cfg.amulet.sb and string.find(text, "Stick Bug Amulet") ~= nil and "sb" or cfg.amulet.snail and string.find(text, "Shell Amulet") ~= nil and "snail"
 
@@ -42357,7 +42418,7 @@ end
 						input:pressButton(noButton, true, true)
 					end
 				else
-					local questionBox = localPlayer.PlayerGui.ScreenGui.QuestionBox
+					local questionBox = gameGui("QuestionBox")
 					local yesButton = rewardsPopUp.YesButton
 					local now = os.clock()
 
@@ -42392,8 +42453,8 @@ end
 					local label = cfg.amulet.star3 .. " Star Amulet Generator"
 					local generator = workspace.Toys[label]
 					goTo(generator.Platform.Position, label)
-					local rewardsPopUp = localPlayer.PlayerGui.ScreenGui.RewardsPopUp
-					local activateButton = gameGui.ActivateButton
+					local rewardsPopUp = gameGui("RewardsPopUp")
+					local activateButton = gameGui("ActivateButton")
 
 					while true do
 						if localPlayer.CoreStats.Honey.Value > 1e10 then
@@ -42472,8 +42533,8 @@ end
 					logger.log("Doing", "Moon Amulet Generator")
 					local moonAmuletGenerator = workspace.Toys["Moon Amulet Generator"]
 					goTo(moonAmuletGenerator.Platform.Position, "Moon Amulet Generator")
-					local rewardsPopUp = localPlayer.PlayerGui.ScreenGui.RewardsPopUp
-					local activateButton = gameGui.ActivateButton
+					local rewardsPopUp = gameGui("RewardsPopUp")
+					local activateButton = gameGui("ActivateButton")
 
 					while true do
 						if not string.find(input:pressActivateButton(), "You need") then
@@ -42551,12 +42612,12 @@ end
 	end
 
 	closePopups = function()
-		local dialog = gameGui.Dialog
-		local beeStats = localPlayer.PlayerGui.ScreenGui.BeeStats
-		local beePopUp = localPlayer.PlayerGui.ScreenGui.BeePopUp
-		local windShrineGui = localPlayer.PlayerGui.ScreenGui.WindShrineGui
-		local questionBox = localPlayer.PlayerGui.ScreenGui.QuestionBox
-		local quantityBox = localPlayer.PlayerGui.ScreenGui.QuantityBox
+		local dialog = gameGui("NPC")
+		local beeStats = gameGui("BeeStats")
+		local beePopUp = gameGui("BeePopUp")
+		local windShrineGui = gameGui("WindShrineGui")
+		local questionBox = gameGui("QuestionBox")
+		local quantityBox = gameGui("QuantityBox")
 
 		if dialog.Visible then
 			skipDialog(dialog)
@@ -42620,11 +42681,11 @@ end
 			end
 		end
 
-		if localPlayer.PlayerGui.ScreenGui.RewardsPopUp.Visible then
+		if gameGui("RewardsPopUp").Visible then
 			handleAmuletPopup()
 		end
 
-		local minigameLayer = gameGui.MinigameLayer
+		local minigameLayer = gameGui("MinigameLayer")
 
 		if buffs.AntChallenge then
 			getHumanoid().Health = 0
@@ -43290,8 +43351,8 @@ end
 			honey = math.floor(localPlayer.CoreStats.Honey.Value),
 			pollen = math.floor(localPlayer.CoreStats.Pollen.Value),
 			backpack = math.floor(localPlayer.CoreStats.Capacity.Value),
-			honeypersec = localPlayer.PlayerGui.ScreenGui.MeterHUD.HoneyMeter.Bar.PerSecLabel.Text,
-			pollenpersec = localPlayer.PlayerGui.ScreenGui.MeterHUD.PollenMeter.Bar.PerSecLabel.Text,
+			honeypersec = gameGui("MeterHUD", "HoneyMeter", "Bar", "PerSecLabel").Text,
+			pollenpersec = gameGui("MeterHUD", "PollenMeter", "Bar", "PerSecLabel").Text,
 		}
 
 		local identifyexecutor_ = identifyexecutor and identifyexecutor()
@@ -45250,50 +45311,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 													end
 												end
 
-												if not (#items < #group) then
-													if #group == #items then
-														local nearestNew = nil
-														local nearestOverlap = nil
-
-														for _, candidate in ipairs(group) do
-															local BalloonBody2 = candidate:FindFirstChild("BalloonBody")
-															local PlayerName2 = candidate:FindFirstChild("PlayerName")
-
-															if not (not BalloonBody2 or not PlayerName2 or PlayerName2.Value ~= localPlayer.Name) then
-																local distance = distanceTo(BalloonBody2.Position, true)
-
-																if not nearestNew or distance < nearestNew.d then
-																	nearestNew = { d = distance, v = BalloonBody2 }
-																end
-															end
-														end
-
-														for _, item in ipairs(items) do
-															local BalloonBody2 = item:FindFirstChild("BalloonBody")
-															local PlayerName2 = item:FindFirstChild("PlayerName")
-
-															if not (not BalloonBody2 or not PlayerName2 or PlayerName2.Value ~= localPlayer.Name) then
-																local distance = distanceTo(BalloonBody2.Position, true)
-
-																if nearestOverlap then
-																	if not (distance < nearestOverlap.d) then
-																		continue
-																	end
-																end
-
-																nearestOverlap = { d = distance, v = BalloonBody2 }
-															end
-														end
-
-														if nearestNew then
-															if nearestOverlap then
-																if nearestNew.d < nearestOverlap.d then
-																	items = group
-																end
-															end
-														end
-													end
-												else
+												if preferGroup(group, items) then
 													items = group
 												end
 											end
@@ -45329,32 +45347,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 										end
 									end
 
-									if not (#items < #group) then
-										if #group == #items then
-											local nearestNew = nil
-											local nearestOverlap = nil
-
-											for _, candidate in ipairs(group) do
-												local distance = distanceTo(candidate.Position, true)
-
-												if not nearestNew or distance < nearestNew.d then
-													nearestNew = { d = distance, v = candidate }
-												end
-											end
-
-											for _, item in ipairs(items) do
-												local distance = distanceTo(item.Position, true)
-
-												if not nearestOverlap or distance < nearestOverlap.d then
-													nearestOverlap = { d = distance, v = item }
-												end
-											end
-										end
-									else
-										items = group
-									end
-
-									if not (not nearestnew or not nearestoverlap or not (nearestnew.d < nearestoverlap.d)) then
+									if preferGroup(group, items) then
 										items = group
 									end
 								end
@@ -45471,7 +45464,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 			local autofarm = cfg.autofarm
 
 			if not (not autofarm.autoxflame or not (not opts.rbc and not opts.nowait and not opts.avoid and not opts.petals and not opts.dupedtokens and not opts.ignorefield and not opts.range and not opts.origin)) then
-				for _, child in ipairs(state.passivesgrid:GetChildren()) do
+				for _, child in ipairs(state.passivesgrid and state.passivesgrid:GetChildren() or {}) do
 					local BG = child:FindFirstChild("BG")
 					local Icon = BG and BG:FindFirstChild("Icon")
 
@@ -52000,7 +51993,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 			for i = 1, 4 do
 				succeeded = succeeded or pcall(function()
 					if label == "Bubble Mask" then
-						goTo(locations.BlueHQ, tool)
+						goTo(locations.BlueHQ, label)
 					elseif label == "Diamond Mask" then
 						goTo(locations.DiamondMaskShop, label)
 					elseif label == "Fire Mask" then
@@ -53328,7 +53321,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 						if ok then
 							local hasStarsawIcon = nil
 
-							for _, child in ipairs(state.passivesgrid:GetChildren()) do
+							for _, child in ipairs(state.passivesgrid and state.passivesgrid:GetChildren() or {}) do
 								local BG = child:FindFirstChild("BG")
 								local Icon = BG and BG:FindFirstChild("Icon")
 								if not (not Icon or Icon.Image ~= "http://www.roblox.com/asset/?id=5101566678") then
@@ -54002,7 +53995,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 								continue
 							end
 
-							local activateButton = gameGui.ActivateButton
+							local activateButton = gameGui("ActivateButton")
 							local now = os.clock()
 
 							while activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) and os.clock() - now < 8 do
@@ -54207,7 +54200,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 					logger.warn("Failed to activate", name)
 					toySelf.time[name] = os.clock()
 				else
-					activateButton = gameGui.ActivateButton
+					activateButton = gameGui("ActivateButton")
 
 					if activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) then
 						text = string.lower(activateButton.TextBox.Text)
@@ -54262,7 +54255,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 						v156 = string.gsub(string.gsub(text, "%(%d+ royal jell", ""), "%(rank", "")
 						v157 = string.match(v156, "%(([^)]+)%)")
 						if not v157 then
-							logger.warn(v156, color)
+							logger.warn(v156)
 							return
 						end
 						v158 = string.gsub(v157, "s", "")
@@ -54617,7 +54610,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 						logger.warn("Failed to activate", name)
 						toySelf.time[name] = os.clock()
 					else
-						activateButton = gameGui.ActivateButton
+						activateButton = gameGui("ActivateButton")
 
 						if activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) then
 							text = string.lower(activateButton.TextBox.Text)
@@ -54672,7 +54665,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 							v156 = string.gsub(string.gsub(text, "%(%d+ royal jell", ""), "%(rank", "")
 							v157 = string.match(v156, "%(([^)]+)%)")
 							if not v157 then
-								logger.warn(v156, color)
+								logger.warn(v156)
 								return
 							end
 							v158 = string.gsub(v157, "s", "")
@@ -55181,7 +55174,7 @@ Content-Disposition: form-data; name="file[0]"; filename="image.png"
 	do
 		local function instantConvert()
 			if cfg.convert.instantType["Honey Wreath"] then
-				if (not gameGui.RBChallenge.Visible or gameGui.RBChallenge.Position.X.Scale > 0.9) and not (not toyUse:Do("Honey Wreath", true) or not (not cfg.convert.convertField or not ((not currentField or getFieldAt(getRootPart().Position) ~= currentField) and not (distanceTo(workspace.Toys["Honey Wreath"].Platform.Position) < 20)))) then
+				if (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale > 0.9) and not (not toyUse:Do("Honey Wreath", true) or not (not cfg.convert.convertField or not ((not currentField or getFieldAt(getRootPart().Position) ~= currentField) and not (distanceTo(workspace.Toys["Honey Wreath"].Platform.Position) < 20)))) then
 					local v123 = toyUse:Do("Honey Wreath")
 
 					if v123 ~= "error" then
@@ -56194,6 +56187,7 @@ farmPuffshroom = function(v119)
 	error("return", 0)
 end
 
+local killMondo
 local function destroyTotems()
 	for k in pairs(tracked.totems) do
 		local Part = k:FindFirstChild("Part")
@@ -56228,7 +56222,7 @@ local function destroyTotems()
 						if field.Name ~= "Mountain Top Field" or not tracked.mondo then
 							farmStep({ skipoverlap = true })
 						else
-							handleMondoChick(true)
+							killMondo(true)
 						end
 					elseif shouldConvert() then
 						convertHoney()
@@ -56257,7 +56251,7 @@ do
 	local stickBugChallenge
 
 	stickBugChallenge = function()
-		local sbChallengeInfo = localPlayer.PlayerGui.ScreenGui.ChallengeInfo.SBChallengeInfo
+		local sbChallengeInfo = gameGui("ChallengeInfo", "SBChallengeInfo")
 
 		if not sbChallengeInfo.Visible or not (sbChallengeInfo.Position.X.Scale < 0.9) then
 			if cfg.stickbug.spawn then
@@ -56288,7 +56282,7 @@ do
 						logger.log("Doing Stick Bug Challenge")
 						local stickBug = workspace.NPCs["Stick Bug"]
 						goTo(stickBug.Platform.Position, "Stick Bug")
-						local npc = localPlayer.PlayerGui.ScreenGui.NPC
+						local npc = gameGui("NPC")
 						input:open(npc, "Stick Bug", "NPCs", stickBug)
 						local optionFrame = npc.OptionFrame
 
@@ -56305,7 +56299,7 @@ do
 							controls["Auto Stick Bug"].Set(false)
 							skipDialog(npc, true)
 						else
-							local questionBox = localPlayer.PlayerGui.ScreenGui.QuestionBox
+							local questionBox = gameGui("QuestionBox")
 							local now, v122 = os.clock()
 							local exitTo = nil
 							local text
@@ -56393,7 +56387,7 @@ do
 							end
 
 							if exitTo ~= 1 then
-								logger.warn(text, color)
+								logger.warn(text)
 								return
 							end
 
@@ -57366,7 +57360,7 @@ do
 		end
 	end
 
-	local function killMondo(v126, v127)
+	killMondo = function(v126, v127)
 		local mondo = tracked.mondo
 
 		if not mondo and cfg.combat.mondoprep then
@@ -58540,18 +58534,18 @@ do
 
 		local function v131(v132, v133)
 			local spawner = monsterSpawners[v132]
-			local v135 = monsterSpawners[v133]
+			local v135 = v133 and monsterSpawners[v133] or nil
 			if not spawner or mobCooldown(spawner) then
 				return
 			end
 			local cactusField = spawner.Name == "WerewolfCave" and workspace.FlowerZones["Cactus Field"] or getFieldAt(spawner.Position)
 
 			if not cactusField or not availableFields[cactusField.Name] then
-				logger.log("No field found for", cactusField.Name, "or field not unlocked")
-				monsterSpawners[spawner.Name] = nil
+				logger.log("No field found for", spawner.Name, "or field not unlocked")
+				monsterSpawners[spawner.Name] = false
 
 				if v135 then
-					monsterSpawners[v135.Name] = nil
+					monsterSpawners[v135.Name] = false
 				end
 
 				return
@@ -59076,7 +59070,7 @@ do
 
 		local function v132(label)
 			local v134 = 0
-			local dialog = gameGui.Dialog
+			local dialog = gameGui("NPC")
 			local OnettWithStickers, imageLabel
 
 			if label ~= "Onett" then
@@ -59426,7 +59420,7 @@ do
 								end
 
 								if not v134.Progress then
-									questData:Status("Debug:", v138 .. " / " .. v139, desc)
+									questData:Status("Debug:", v138 .. " / " .. v139, v134.Description)
 								end
 
 								questData:Status("Auto Quest: Feeding x" .. v140, match, "to bee at", v141.Col, v141.Row)
@@ -59506,7 +59500,7 @@ do
 								end
 
 								if not v134.Progress or not v134.Level then
-									questData:Status("Debug:", "lvl", v139, v137 .. " / " .. v138, desc)
+									questData:Status("Debug:", "lvl", v139, v137 .. " / " .. v138, v134.Description)
 								end
 
 								local col = v140.Col
@@ -59593,7 +59587,7 @@ do
 								end
 
 								if not v134.Progress then
-									questData:Status("Debug:", v137 .. " / " .. v138, desc)
+									questData:Status("Debug:", v137 .. " / " .. v138, v134.Description)
 								end
 
 								questData:Status("Auto Quest: Using Royal Jelly on bee at", v139.Col, v139.Row)
@@ -60441,7 +60435,7 @@ do
 									end
 								end
 
-								if not (not name or not (name == "BasicShop" or not ((name ~= "ProShop" or not (state.bees >= 10)) and (name ~= "Mountaintop" or not (state.bees >= 25)) and (name ~= "Petal Shop" or not (state.bees >= 35)) and (name ~= "BlueHQ" or not state.bluehq) and (name ~= "RedHQ" or not state.redhq) and (name ~= "GummyBearShop" or not gummylair)))) then
+								if not (not name or not (name == "BasicShop" or not ((name ~= "ProShop" or not (state.bees >= 10)) and (name ~= "Mountaintop" or not (state.bees >= 25)) and (name ~= "Petal Shop" or not (state.bees >= 35)) and (name ~= "BlueHQ" or not state.bluehq) and (name ~= "RedHQ" or not state.redhq) and (name ~= "GummyBearShop" or state.bees < 15 or (gameApi:Cache({"Badges", "Goo"}) or 0) < 2)))) then
 									questData:Status("Auto Quest: Equipping", autoquest.oldtool, "(Last Tool)")
 									local ok = nil
 
@@ -60744,8 +60738,6 @@ do
 		bluepollen = { "Blue Pollen", "Blue Flowers" },
 		redpollen = { "Red Pollen", "Red Flowers" },
 		whitepollen = { "White Pollen", "White Flowers" },
-		frame = localPlayer.PlayerGui.ScreenGui.RoboBearPrompt,
-		challenge = localPlayer.PlayerGui.ScreenGui.ChallengeInfo.RBChallengeInfo,
 		HandleCogmowers = function(v131, allowNormalCogs)
 			local goldcogs = nil
 			local cogField = nil
@@ -60805,7 +60797,7 @@ do
 
 									local materialOptions = {
 										RBC = true,
-										Round = "Round " .. (tonumber(string.match(v131.challenge.MainFrame.RoundLabel.Text, "%d+")) or 99),
+										Round = "Round " .. (tonumber(string.match(gameGui("ChallengeInfo", "RBChallengeInfo").MainFrame.RoundLabel.Text, "%d+")) or 99),
 									}
 
 									local mobs = {}
@@ -60843,7 +60835,7 @@ do
 										end
 									end
 								else
-									for k, entitySet in pairs(getupvalue(require(ReplicatedStorage.LocalFlyingEntity).Destroy, 3)) do
+									for k, entitySet in pairs(debug.getupvalue(require(ReplicatedStorage.LocalFlyingEntity).Destroy, 3)) do
 										if not (k == "Bee" or k == "Mechsquito") then
 											for k2 in pairs(entitySet) do
 												if k2.Alive then
@@ -60851,10 +60843,6 @@ do
 
 													if not (not field or field.Name ~= cogField.Name) then
 														farmOptions[k2.Pos] = 15
-
-														if not mob then
-															mob = k2.Pos
-														end
 
 														if not (not k2.Moving or not k2.PosNext) then
 															rbc.Avoid(farmOptions, k2.Pos, k2.PosNext, 10)
@@ -60974,10 +60962,10 @@ do
 	local rbcAmuletCheck
 
 	rbcAmuletCheck = function()
-		local rewardsPopUp = localPlayer.PlayerGui.ScreenGui.RewardsPopUp
+		local rewardsPopUp = gameGui("RewardsPopUp")
 
-		if not rbc.frame.Visible and rewardsPopUp.Visible then
-			handleAmuletPopup(rbc.frame)
+		if not gameGui("RoboBearPrompt").Visible and rewardsPopUp.Visible then
+			handleAmuletPopup(gameGui("RoboBearPrompt"))
 		end
 
 		if cfg.rbc.materialsenabled then
@@ -61014,8 +61002,8 @@ do
 			end
 		end
 
-		if rbc.frame.Visible then
-			local box = rbc.frame.MainFrame.Box
+		if gameGui("RoboBearPrompt").Visible then
+			local box = gameGui("RoboBearPrompt").MainFrame.Box
 			local startRoundButton = box.StartRoundButton
 			local questSelectScreen = box.QuestSelectScreen
 			local beeSelectScreen = box.BeeSelectScreen
@@ -61023,7 +61011,7 @@ do
 			local visible = box.EndScreen.Visible
 			local v132 = 25
 
-			while rbc.frame.Visible do
+			while gameGui("RoboBearPrompt").Visible do
 				if not RunService.Heartbeat:Wait() then
 					break
 				end
@@ -61060,7 +61048,7 @@ do
 						if cfg.rbc.highestcog then
 							local highestcogmax = cfg.rbc.highestcogmax
 
-							if tonumber(string.match(rbc.challenge.MainFrame.RoundLabel.Text, "%d+")) <= highestcogmax then
+							if tonumber(string.match(gameGui("ChallengeInfo", "RBChallengeInfo").MainFrame.RoundLabel.Text, "%d+")) <= highestcogmax then
 								local hasConvertTask = nil
 
 								if not cfg.rbc.cogconvert then
@@ -61129,7 +61117,7 @@ do
 						return scoreA > scoreB or scoreA == scoreB and buttonA.reward > buttonB.reward
 					end)
 
-					if not v134 and not (not cfg.rbc.rerollquests or not (cfg.rbc.rerollmin <= tonumber(string.match(rbc.challenge.MainFrame.RoundLabel.Text, "%d+")))) then
+					if not v134 and not (not cfg.rbc.rerollquests or not (cfg.rbc.rerollmin <= tonumber(string.match(gameGui("ChallengeInfo", "RBChallengeInfo").MainFrame.RoundLabel.Text, "%d+")))) then
 						v134 = true
 
 						for _, task_ in ipairs(questButtons[1].tasks) do
@@ -61216,7 +61204,7 @@ do
 					if not (not cfg.rbc.rerollbees or not box.RerollButton.Visible or box.RerollButton.BackgroundTransparency ~= 0 or not (rbc.rerollbeesround ~= box.TitleBar.Title.Text or rbc.rerollbees < cfg.rbc.rerollbeesmax)) then
 						local foundBeeIcon = nil
 
-						for _, child in ipairs(rbc.frame.MainFrame.BeeLog:GetChildren()) do
+						for _, child in ipairs(gameGui("RoboBearPrompt").MainFrame.BeeLog:GetChildren()) do
 							if not (child.Name ~= "BIcon" or child.Image ~= "rbxassetid://11871422222") then
 								foundBeeIcon = true
 								break
@@ -61266,12 +61254,12 @@ do
 						end
 					end
 
-					local text = rbc.frame.MainFrame.ActiveBeesTxt.Text
+					local text = gameGui("RoboBearPrompt").MainFrame.ActiveBeesTxt.Text
 					local now = os.clock()
 					rbc.beeselect = now
 					gameApi:Event("RoboBearBeeSelect", v134 and v134.index or 1)
 
-					while not (text ~= rbc.frame.MainFrame.ActiveBeesTxt.Text or not (os.clock() - now < 2)) do
+					while not (text ~= gameGui("RoboBearPrompt").MainFrame.ActiveBeesTxt.Text or not (os.clock() - now < 2)) do
 						RunService.Heartbeat:Wait()
 					end
 				end
@@ -61394,7 +61382,7 @@ do
 						secureCall(gameApi.RoboBearGuiClose)
 					end
 
-					while not (not rbc.frame.Visible or not (os.clock() - now < 2)) do
+					while not (not gameGui("RoboBearPrompt").Visible or not (os.clock() - now < 2)) do
 						if RunService.Heartbeat:Wait() then
 							RunService.Heartbeat:Wait()
 							continue
@@ -61407,7 +61395,7 @@ do
 			local now = os.clock()
 
 			if not visible then
-				while (not rbc.challenge.Visible or rbc.challenge.Position.X.Scale > 0.9) and os.clock() - now < 2 do
+				while (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale > 0.9) and os.clock() - now < 2 do
 					RunService.Heartbeat:Wait()
 				end
 			elseif v132 > 4 then
@@ -61416,14 +61404,14 @@ do
 				end
 			end
 
-			if not (not cfg.rbc.enabled and not (not visible and not (not rbc.challenge.Visible or not (rbc.challenge.Position.X.Scale < 0.9)))) then
+			if not (not cfg.rbc.enabled and not (not visible and not (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or not (gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale < 0.9)))) then
 				rbcAmuletCheck()
 			end
-		elseif not (not rbc.challenge.Visible or not (rbc.challenge.Position.X.Scale < 0.9)) then
+		elseif not (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or not (gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale < 0.9)) then
 			if not rbc.disableusedrives and not (not cfg.rbc.usedrives.Blue and not cfg.rbc.usedrives.Red and not cfg.rbc.usedrives.White and not cfg.rbc.usedrives.Glitched) then
 				local exitTo = nil
 
-				for _, child in ipairs(rbc.frame.MainFrame.BeeLog:GetChildren()) do
+				for _, child in ipairs(gameGui("RoboBearPrompt").MainFrame.BeeLog:GetChildren()) do
 					if not (child.Name ~= "BIcon" or child.Image ~= "rbxassetid://11871422222") then
 						exitTo = 1
 						break
@@ -61433,7 +61421,7 @@ do
 				if exitTo == 1 then
 					local now = os.clock()
 
-					while not (not rbc.challenge.Visible or not (rbc.challenge.Position.X.Scale < 0.9) or not (os.clock() - now < 300)) do
+					while not (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or not (gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale < 0.9) or not (os.clock() - now < 300)) do
 						if RunService.Heartbeat:Wait() then
 							local hasSpareDrive = nil
 
@@ -61466,7 +61454,7 @@ do
 				rbc.disableusedrives = true
 			end
 
-			local mainFrame = rbc.challenge.MainFrame
+			local mainFrame = gameGui("ChallengeInfo", "RBChallengeInfo").MainFrame
 			local currentRound = tonumber(string.match(mainFrame.RoundLabel.Text, "%d+")) or 25
 			rbc.disableroundend = nil
 
@@ -61484,7 +61472,7 @@ do
 					local now = os.clock()
 					gameApi:Event("RoboBearRoundEnd", true)
 
-					while not (not rbc.challenge.Visible or not (rbc.challenge.Position.X.Scale < 0.9) or not (os.clock() - now < 2)) do
+					while not (not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or not (gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale < 0.9) or not (os.clock() - now < 2)) do
 						RunService.Heartbeat:Wait()
 					end
 
@@ -61564,7 +61552,7 @@ do
 			local exitTo2 = nil
 
 			while true do
-				if not rbc.challenge.Visible or not (rbc.challenge.Position.X.Scale < 0.9) or not (os.clock() - now < 300) then
+				if not gameGui("ChallengeInfo", "RBChallengeInfo").Visible or not (gameGui("ChallengeInfo", "RBChallengeInfo").Position.X.Scale < 0.9) or not (os.clock() - now < 300) then
 					exitTo2 = 1
 					break
 				else
@@ -61630,7 +61618,7 @@ do
 									local homepageMatched = nil
 
 									if cfg.rbc.homepage then
-										for _, child in ipairs(rbc.frame.MainFrame.UpgradeLog:GetChildren()) do
+										for _, child in ipairs(gameGui("RoboBearPrompt").MainFrame.UpgradeLog:GetChildren()) do
 											if child.Name == "UGEntry" then
 												local text = child.TitleLbl.Text
 
@@ -61651,7 +61639,7 @@ do
 									local homepageMatched = nil
 
 									if cfg.rbc.homepage then
-										for _, child in ipairs(rbc.frame.MainFrame.UpgradeLog:GetChildren()) do
+										for _, child in ipairs(gameGui("RoboBearPrompt").MainFrame.UpgradeLog:GetChildren()) do
 											if child.Name == "UGEntry" then
 												local text = child.TitleLbl.Text
 
@@ -61676,7 +61664,7 @@ do
 									local homepageMatched = nil
 
 									if cfg.rbc.homepage then
-										for _, child in ipairs(rbc.frame.MainFrame.UpgradeLog:GetChildren()) do
+										for _, child in ipairs(gameGui("RoboBearPrompt").MainFrame.UpgradeLog:GetChildren()) do
 											if child.Name == "UGEntry" then
 												local text = child.TitleLbl.Text
 
@@ -61884,7 +61872,7 @@ do
 										end
 									end
 								else
-									for k, entityGroup in pairs(getupvalue(require(ReplicatedStorage.LocalFlyingEntity).Destroy, 3)) do
+									for k, entityGroup in pairs(debug.getupvalue(require(ReplicatedStorage.LocalFlyingEntity).Destroy, 3)) do
 										if not (k == "Bee" or k == "Mechsquito") then
 											for k2 in pairs(entityGroup) do
 												if k2.Alive then
@@ -62084,12 +62072,12 @@ do
 				break
 			end
 
-			local dialog = gameGui.Dialog
+			local dialog = gameGui("NPC")
 			local roboBear = workspace.NPCs["Robo Bear"]
 			goTo(roboBear.Platform.Position, "Robo Bear")
 
-			if not (not rbc.frame.Visible and (not rewardsPopUp.Visible or not string.find(rewardsPopUp.AmuletFrame.Title.Text, "Cog Amulet"))) then
-				handleAmuletPopup(rbc.frame)
+			if not (not gameGui("RoboBearPrompt").Visible and (not rewardsPopUp.Visible or not string.find(rewardsPopUp.AmuletFrame.Title.Text, "Cog Amulet"))) then
+				handleAmuletPopup(gameGui("RoboBearPrompt"))
 			end
 
 			input:open(dialog, "Robo Bear", "NPCs", roboBear)
@@ -62124,11 +62112,11 @@ do
 
 				local now2 = os.clock()
 
-				while not rbc.frame.Visible and os.clock() - now2 < 2 do
+				while not gameGui("RoboBearPrompt").Visible and os.clock() - now2 < 2 do
 					RunService.Heartbeat:Wait()
 				end
 
-				if rbc.frame.Visible then
+				if gameGui("RoboBearPrompt").Visible then
 					rbc.disableusedrives = nil
 					rbcAmuletCheck()
 				end
@@ -62776,7 +62764,7 @@ do
 							if alreadyDelivered then
 								continue
 							end
-							local dialog = gameGui.Dialog
+							local dialog = gameGui("NPC")
 							local OnettWithStickers
 
 							if label ~= "Onett" then
@@ -63061,7 +63049,7 @@ do
 											else
 												secureCall(gameApi.Toys, localPlayer, claimerToy)
 												now = os.clock()
-												activateButton = gameGui.ActivateButton
+												activateButton = gameGui("ActivateButton")
 
 												while not (activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) or not (os.clock() - now < 2)) do
 													RunService.Heartbeat:Wait()
@@ -63106,7 +63094,7 @@ do
 									else
 										secureCall(gameApi.Toys, localPlayer, claimerToy)
 										now = os.clock()
-										activateButton = gameGui.ActivateButton
+										activateButton = gameGui("ActivateButton")
 
 										while not (activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) or not (os.clock() - now < 2)) do
 											RunService.Heartbeat:Wait()
@@ -63150,7 +63138,7 @@ do
 										else
 											secureCall(gameApi.Toys, localPlayer, claimerToy)
 											now = os.clock()
-											activateButton = gameGui.ActivateButton
+											activateButton = gameGui("ActivateButton")
 
 											while not (activateButton.BackgroundColor3 ~= Color3.fromRGB(50, 131, 255) or not (os.clock() - now < 2)) do
 												RunService.Heartbeat:Wait()
@@ -63793,13 +63781,15 @@ do
 	end
 end
 
-ScreenGui.Destroying:Connect(function()
-	stopMovement()
-	connections:CancelAll()
-	threads:CancelAll()
+ui.onUnload = function()
+	if ui.showBees then ui.showBees() end
+	local character = localPlayer.Character
+	if character and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("Humanoid") then
+		pcall(stopMovement)
+	end
 
 	for k in pairs(tokenFilter.list) do
-		restorefunction(k)
+		pcall(restorefunction, k)
 	end
 
 	for _, uiPart in pairs(uiParts) do
@@ -63826,8 +63816,7 @@ ScreenGui.Destroying:Connect(function()
 	ui = nil
 	logger = nil
 	mobileToggleButton = nil
-	_G.atlas = nil
-end)
+end
 
 connections:Add("robloxmenu", getService("GuiService").MenuOpened:Connect(function()
 	ScreenGui.Enabled = false
@@ -63852,7 +63841,7 @@ do
 	if gethui then
 		local hui = gethui()
 		table.insert(guiParents, hui)
-		connections:Add("scripts", hui.ChildAdded:Connect(onMacrowareAdded))
+		connections:Add("huiScripts", hui.ChildAdded:Connect(onMacrowareAdded))
 	end
 
 	for _, guiParent in ipairs(guiParents) do
@@ -63875,7 +63864,7 @@ threads:Add("antistuck", function()
 	local position2 = nil
 
 	while task.wait(60) do
-		if not cfg.autofarm.enabled or not (not state.stop and not not (distanceTo(localPlayer.SpawnPos.Value.Position, true) > 9) and not getFieldAt(getRootPart().Position) and (not cfg.combat.killcrab or not not (distanceTo(Vector3.new(-258, 106, 483)) > 30)) and (not cfg.combat.killcommando or not not (distanceTo(Vector3.new(530, 68, 160)) > 50)) and (not cfg.toys.windshrine and not cfg.combat.donatevials and not cfg.autoquest.windshrine or not not (distanceTo(workspace.NPCs["Wind Shrine"].Platform.Position) > 15)) and (not cfg.toys.enabled or not gameGui.MinigameLayer.Visible) and (not cfg.combat.commandohelp or not not (distanceTo(Vector3.new(470, 49, 165)) > 15))) then
+		if not cfg.autofarm.enabled or not (not state.stop and not not (distanceTo(localPlayer.SpawnPos.Value.Position, true) > 9) and not getFieldAt(getRootPart().Position) and (not cfg.combat.killcrab or not not (distanceTo(Vector3.new(-258, 106, 483)) > 30)) and (not cfg.combat.killcommando or not not (distanceTo(Vector3.new(530, 68, 160)) > 50)) and (not cfg.toys.windshrine and not cfg.combat.donatevials and not cfg.autoquest.windshrine or not not (distanceTo(workspace.NPCs["Wind Shrine"].Platform.Position) > 15)) and (not cfg.toys.enabled or not gameGui("MinigameLayer").Visible) and (not cfg.combat.commandohelp or not not (distanceTo(Vector3.new(470, 49, 165)) > 15))) then
 			position2 = nil
 		elseif not position2 or not (distanceTo(position2) < 8) then
 			position2 = getRootPart().Position
@@ -64007,16 +63996,19 @@ if isfile("atlasplanters-" .. localPlayer.Name .. ".json") then
 	end
 end
 
-local setupAttempts = 0
-
-while not (not (setupAttempts < 5) or not (not pcall(gameApi.SetupSecureCall) or not pcall(gameApi.Setup, gameApi))) do
-	task.wait(0.1)
-	setupAttempts += 1
-end
-
-if setupAttempts == 5 then
-	local StarterGui = getService("StarterGui")
-	return StarterGui:SetCore("SendNotification", { Title = "Warning", Text = "Your executor is not supported.", Duration = 10 })
+do
+	local deadline = os.clock() + 15
+	while true do
+		local ready, reason = pcall(function()
+			gameApi.SetupSecureCall()
+			gameApi:Setup()
+		end)
+		if ready then break end
+		if os.clock() >= deadline then
+			error("Atlas could not initialize the game API: " .. tostring(reason))
+		end
+		task.wait(0.5)
+	end
 end
 
 do
@@ -67052,17 +67044,27 @@ Are you sure you want to enable it?]])
 					end
 				end, "antilag", "stations", { Hook = true })
 
-				antiLagFolder.AddSwitch("Hide Bees", function(n)
-					if n and not connections:Get("bees") then
-						for n, n in ipairs(workspace.Bees:GetChildren()) do
-							n:Destroy()
-						end
-
-						connections:Add("bees", workspace.Bees.ChildAdded:Connect(function(n)
-							RunService.Heartbeat:Wait()
-							n:Destroy()
-						end))
+				local hiddenBees = setmetatable({}, { __mode = "k" })
+				local function showBees()
+					connections:Cancel("bees")
+					for part, original in pairs(hiddenBees) do
+						if part.Parent then part.LocalTransparencyModifier = original end
+						hiddenBees[part] = nil
 					end
+				end
+				ui.showBees = showBees
+				antiLagFolder.AddSwitch("Hide Bees", function(enabled)
+					if not enabled then return showBees() end
+					local bees = workspace:FindFirstChild("Bees")
+					if not bees or connections:Get("bees") then return end
+					local function hide(part)
+						if part:IsA("BasePart") and hiddenBees[part] == nil then
+							hiddenBees[part] = part.LocalTransparencyModifier
+							part.LocalTransparencyModifier = 1
+						end
+					end
+					connections:Add("bees", bees.DescendantAdded:Connect(hide))
+					for _, part in ipairs(bees:GetDescendants()) do hide(part) end
 				end, "antilag", "bees")
 
 				antiLagFolder.AddSwitch("Hide Flowers", function(n)
@@ -67096,6 +67098,7 @@ Are you sure you want to enable it?]])
 						local y = workspace.Toys["Sticker Stack"].StackModel
 						local o = workspace:FindFirstChild("Collectibles")
 						local Z = workspace.Particles
+						local bees = workspace:FindFirstChild("Bees")
 
 						for p, p in ipairs(workspace:GetDescendants()) do
 							local P = p.ClassName
@@ -67107,7 +67110,7 @@ Are you sure you want to enable it?]])
 									p.Material = Enum.Material.Plastic
 									p.Reflectance = 0
 								end
-							elseif (P == "Decal" or P == "Texture") and not p:IsDescendantOf(workspace.Bees) and p.Texture ~= "rbxassetid://3581259086" and not p:IsDescendantOf(L) and not p:IsDescendantOf(y) and (not state.hive or not p:IsDescendantOf(state.hive)) and (not o or not p:IsDescendantOf(o)) and not p:IsDescendantOf(Z) then
+							elseif (P == "Decal" or P == "Texture") and (not bees or not p:IsDescendantOf(bees)) and p.Texture ~= "rbxassetid://3581259086" and not p:IsDescendantOf(L) and not p:IsDescendantOf(y) and (not state.hive or not p:IsDescendantOf(state.hive)) and (not o or not p:IsDescendantOf(o)) and not p:IsDescendantOf(Z) then
 								p:Destroy()
 							elseif P == "ParticleEmitter" and p.Name ~= "PuffshroomSpores" and not p:IsDescendantOf(Z) then
 								p:Destroy()
@@ -67415,7 +67418,7 @@ Are you sure you want to enable it?]])
 							end
 						end
 
-						for n, n in ipairs(removelinks) do
+						for n, n in ipairs({3258, 3259, 3260}) do
 							pathNodes[n] = nil
 							pathLinks[n] = nil
 
@@ -67468,7 +67471,7 @@ Are you sure you want to enable it?]])
 				end, "antilag", "players")
 
 				antiLagFolder.AddSwitch("Hide BSS UI", function(n)
-					localPlayer.PlayerGui.ScreenGui.Enabled = not n
+					gameGui().Enabled = not n
 				end, "antilag", "bssui")
 
 				antiLagFolder.AddSwitch("Anti Lag", function(enabled)
@@ -67724,6 +67727,7 @@ end
 localPlayer:Kick("You are blacklisted\nIf you believe this is a mistake dm chris12089")
 end, debug.traceback)
 if (not ok or problem ~= true) and ownedGui and _G.atlas == ownedGui then
+	if cleanup then cleanup() end
 	pcall(function() ownedGui:Destroy() end)
 	if _G.atlas == ownedGui then _G.atlas = nil end
 end
