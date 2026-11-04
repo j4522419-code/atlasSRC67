@@ -67099,9 +67099,17 @@ Are you sure you want to enable it?]])
 						local o = workspace:FindFirstChild("Collectibles")
 						local Z = workspace.Particles
 						local bees = workspace:FindFirstChild("Bees")
+						local sprouts = workspace:FindFirstChild("Sprouts")
+						local hiveDeco = workspace:FindFirstChild("HiveDeco")
+						local canvases = hiveDeco and hiveDeco:FindFirstChild("StickerCanvases")
 
-						for p, p in ipairs(workspace:GetDescendants()) do
+						for _, p in ipairs(workspace:GetDescendants()) do
 							local P = p.ClassName
+							if canvases and p:IsDescendantOf(canvases) then continue end
+							if p.Name == "Sparkles" and sprouts and p:IsDescendantOf(sprouts) then
+								if p:IsA("ParticleEmitter") or p:IsA("Sparkles") then p.Enabled = false end
+								continue
+							end
 
 							if P == "BasePart" or P == "Part" or P == "WedgePart" or P == "TrussPart" or P == "UnionOperation" or P == "SpawnLocation" then
 								if p.CollisionGroup == "BoostBallBarrier" then
@@ -67306,12 +67314,6 @@ Are you sure you want to enable it?]])
 
 						if n then
 							local L = n:FindFirstChild("HiveModels")
-
-							if L then
-								L:Destroy()
-							end
-
-							local L = n:FindFirstChild("StickerCanvases")
 
 							if L then
 								L:Destroy()
