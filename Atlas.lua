@@ -62733,12 +62733,14 @@ do
 			local route2 = cfg.toys.route or progression.default
 
 			for _, routeItem in ipairs_2(route2) do
-				if not (routeItem.Type ~= "Present" or not (playerData.Eggs.Present > 0)) then
+				if routeItem.Type == "Present" then
 					local ipairs_3 = ipairs
 					local data2 = type(routeItem.Data) == "table" and routeItem.Data or { routeItem.Data }
 
 					for _, label in ipairs_3(data2) do
-						if playerData.Eggs.Present > 0 and (label == "Brown Bear" or label == "Black Bear" or label == "Mother Bear" or not ((label ~= "Spirit Bear" or state.bees ~= 35) and (label ~= "Onett" or not (state.bees >= 30)) and not ((label == "Polar Bear" or label == "Honey Bee") and state.bees >= 15 or not ((label ~= "Dapper Bear" or not (not not (state.bees >= 10) and dapperShopOpen)) and (label ~= "Riley Bee" or not (not not (state.bees >= 15) and state.redhq)) and (label ~= "Bucko Bee" or not state.bluehq) and (label ~= "Science Bear" or not (state.bees >= 10)) and (label ~= "Panda Bear" or not (state.bees >= 5)))))) then
+						local count = playerData.Eggs and tonumber(playerData.Eggs.Present)
+						if not count or count <= 0 then break end
+						if (label == "Brown Bear" or label == "Black Bear" or label == "Mother Bear" or not ((label ~= "Spirit Bear" or state.bees ~= 35) and (label ~= "Onett" or not (state.bees >= 30)) and not ((label == "Polar Bear" or label == "Honey Bee") and state.bees >= 15 or not ((label ~= "Dapper Bear" or not (not not (state.bees >= 10) and dapperShopOpen)) and (label ~= "Riley Bee" or not (not not (state.bees >= 15) and state.redhq)) and (label ~= "Bucko Bee" or not state.bluehq) and (label ~= "Science Bear" or not (state.bees >= 10)) and (label ~= "Panda Bear" or not (state.bees >= 5)))))) then
 							local alreadyDelivered = true
 
 							if label == "Robo Bear" or label == "Bucko Bee" or label == "Riley Bee" then
