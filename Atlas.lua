@@ -766,12 +766,16 @@ local gameApi = {}
 
 for _, child in ipairs(workspace.MonsterSpawners:GetChildren()) do
 	monsterSpawners[child.Name] = { MonsterType = child.MonsterType.Value, Position = child.Position, Name = child.Name }
+end
 
-	if not child:FindFirstChild("Attachment") then
-		monsterSpawners[child.Name].timer = child.TimerAttachment.TimerGui.TimerLabel
-	else
-		monsterSpawners[child.Name].timer = child.Attachment.TimerGui.TimerLabel
+local function isSpawnerTimerVisible(spawner)
+	local label = spawner.timer
+	if not label or not label:IsDescendantOf(workspace.MonsterSpawners) then
+		local part = workspace.MonsterSpawners:FindFirstChild(spawner.Name)
+		label = part and part:FindFirstChild("TimerLabel", true)
+		spawner.timer = label
 	end
+	return label ~= nil and label:IsA("GuiObject") and label.Visible
 end
 
 local gameGui = {
@@ -6613,7 +6617,7 @@ mobCooldown = function(spawner, asText)
 			return secondsLeft .. "s"
 		end
 
-		if spawner.timer.Visible then
+		if isSpawnerTimerVisible(spawner) then
 			setTimer(spawner.Name, nil)
 			return mobCooldown(spawner, asText)
 		end
@@ -58570,7 +58574,7 @@ do
 							break
 						end
 
-						if not v143.timer.Visible then
+						if not isSpawnerTimerVisible(v143) then
 							for k in pairs(tracked.mobs) do
 								if string.find(k.Name, v143.MonsterType) then
 									local HumanoidRootPart = k:FindFirstChild("HumanoidRootPart")
