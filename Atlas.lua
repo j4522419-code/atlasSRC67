@@ -62471,104 +62471,76 @@ do
 				"PlentyPlanter",
 			},
 		},
-		HatchEgg = function()
-			local honeycomb, v135
+		HatchEgg = function(progression, honeycomb, eggType)
+			if type(honeycomb) ~= "table" then return end
+			local cells = state.hive and state.hive:FindFirstChild("Cells")
+			if not cells then return end
 
-			for k in pairs(honeycomb) do
-				v135 = nil
-				break
+			local function occupied(x, y)
+				local column = honeycomb["x" .. x]
+				return column and column["y" .. y]
 			end
 
-			local eggType, progression
+			local firstBee = true
+			for _, column in pairs(honeycomb) do
+				if next(column) then
+					firstBee = false
+					break
+				end
+			end
 
-			if not v135 then
-				local emptyCell
-
-				for i = 1, 10 do
-					for i2 = 1, 5 do
-						local hiveColumn = honeycomb["x" .. i2]
-						local isAdjacent = false
-
-						if not hiveColumn or not hiveColumn["y" .. i] and not state.hive.Cells["C" .. i2 .. "," .. i].CellLocked.Value then
-							for i3 = -1, 1, 2 do
-								if not ((not hiveColumn or not hiveColumn["y" .. i + i3]) and (not (i2 < 5) or not honeycomb["x" .. i2 + 1] or not honeycomb["x" .. i2 + 1]["y" .. i]) and not (not not (i2 > 1) and not (not honeycomb["x" .. i2 - 1] or not honeycomb["x" .. i2 - 1]["y" .. i]))) then
-									isAdjacent = true
-									break
-								end
-							end
-
-							if isAdjacent then
-								emptyCell = { i2, i }
-								break
-							end
-						end
-					end
-
-					if emptyCell then
-						logger.log("Hatching", eggType, "Bee at cell", emptyCell[1] .. ",", emptyCell[2])
-
-						if distanceTo(localPlayer.SpawnPos.Value.Position, true) > 9 then
-							goTo(localPlayer.SpawnPos.Value.Position, "Hive")
-							task.wait(0.5)
-						end
-
-						local eggName = eggType == "Basic" and eggType or eggType .. "Bee"
-						local ConstructHiveCellFromEgg, hatchOk, newHoneycomb, discoveredBees, eggUses = gameApi:Event("ConstructHiveCellFromEgg", emptyCell[1], emptyCell[2], eggName, 1, false)
-
-						if not hatchOk then
-							logger.warn("Failed to hatch", eggType, "Bee Egg")
-							error("return", 0)
-						else
-							gameApi:CacheSet({ "Eggs", eggName }, ConstructHiveCellFromEgg)
-							gameApi:CacheSet("Honeycomb", newHoneycomb)
-							gameApi:CacheSet("DiscoveredBees", discoveredBees)
-							gameApi:CacheSet({ "Totals", "EggUses" }, eggUses)
-							secureCall(gameApi.GateManager)
-							local bees = state.bees
-							claimHive()
-							updateAvailableFields(true)
-
-							if not (bees < 15) or not (state.bees >= 15) then
-								if not (not (bees < 5) or not (state.bees >= 5)) then
-									controls.bestbluefield.Set("Bamboo Field")
-									controls.bestredfield.Set("Strawberry Field")
-									controls.bestwhitefield.Set("Spider Field")
-								end
-							else
-								controls.bestbluefield.Set("Pine Tree Forest")
-								controls.bestredfield.Set("Rose Field")
-							end
-
-							progression.time = nil
-							task.wait(0.25)
-							error("return", 0)
+			local cellX, cellY
+			for y = 1, 10 do
+				for x = 1, 5 do
+					local cell = cells:FindFirstChild("C" .. x .. "," .. y)
+					local lock = cell and cell:FindFirstChild("CellLocked")
+					if lock and not lock.Value and not occupied(x, y) and not cell:FindFirstChild("Faceplate") then
+						if (firstBee and x == 1 and y == 1) or occupied(x - 1, y) or occupied(x + 1, y) or occupied(x, y - 1) or occupied(x, y + 1) then
+							cellX, cellY = x, y
+							break
 						end
 					end
 				end
-			else
-				logger.log("Hatching", eggType, "Bee at cell 1, 1")
+				if cellX then break end
+			end
+			if not cellX then return end
 
-				if distanceTo(localPlayer.SpawnPos.Value.Position, true) > 9 then
-					goTo(localPlayer.SpawnPos.Value.Position, "Hive")
-					task.wait(0.5)
-				end
+			logger.log("Hatching", eggType, "Bee at cell", cellX .. "," .. cellY)
+			if distanceTo(localPlayer.SpawnPos.Value.Position, true) > 9 then
+				goTo(localPlayer.SpawnPos.Value.Position, "Hive")
+				task.wait(0.5)
+			end
 
-				local eggName = eggType == "Basic" and eggType or eggType .. "Bee"
-				local ConstructHiveCellFromEgg, hatchOk, newHoneycomb, discoveredBees, eggUses = gameApi:Event("ConstructHiveCellFromEgg", 1, 1, eggName, 1, false)
+			local eggName = eggType == "Basic" and eggType or eggType .. "Bee"
+			local remaining, hatchOk, newHoneycomb, discoveredBees, eggUses = gameApi:Event("ConstructHiveCellFromEgg", cellX, cellY, eggName, 1, false)
+			if not hatchOk then
+				logger.warn("Failed to hatch", eggType, "Bee Egg")
+				error("return", 0)
+			end
+			gameApi:CacheSet({ "Eggs", eggName }, remaining)
+			gameApi:CacheSet("Honeycomb", newHoneycomb)
+			gameApi:CacheSet("DiscoveredBees", discoveredBees)
+			gameApi:CacheSet({ "Totals", "EggUses" }, eggUses)
+			if not firstBee then
+				secureCall(gameApi.GateManager)
+				local bees = state.bees
+				claimHive()
+				updateAvailableFields(true)
 
-				if not hatchOk then
-					logger.warn("Failed to hatch", eggType, "Bee Egg")
-					error("return", 0)
+				if not (bees < 15) or not (state.bees >= 15) then
+					if not (not (bees < 5) or not (state.bees >= 5)) then
+						controls.bestbluefield.Set("Bamboo Field")
+						controls.bestredfield.Set("Strawberry Field")
+						controls.bestwhitefield.Set("Spider Field")
+					end
 				else
-					gameApi:CacheSet({ "Eggs", eggName }, ConstructHiveCellFromEgg)
-					gameApi:CacheSet("Honeycomb", newHoneycomb)
-					gameApi:CacheSet("DiscoveredBees", discoveredBees)
-					gameApi:CacheSet({ "Totals", "EggUses" }, eggUses)
-					progression.time = nil
-					task.wait(0.25)
-					error("return", 0)
+					controls.bestbluefield.Set("Pine Tree Forest")
+					controls.bestredfield.Set("Rose Field")
 				end
 			end
+			progression.time = nil
+			task.wait(0.25)
+			error("return", 0)
 		end,
 		Handle = function(progression)
 			if progression.time then
@@ -62580,7 +62552,9 @@ do
 
 			progression.time = os.clock()
 			local playerData = gameApi:Cache()
-			local honeycomb = playerData.Honeycomb
+			local honeycomb = playerData and playerData.Honeycomb
+			local cells = state.hive and state.hive:FindFirstChild("Cells")
+			if type(honeycomb) ~= "table" or not cells then return end
 			local cellCount = 0
 			local data = nil
 			local hasEmptyCell = nil
@@ -62605,8 +62579,9 @@ do
 				for i = 1, 5 do
 					if not hasEmptyCell then
 						for i2 = 1, 10 do
-							local hiveCell = state.hive.Cells["C" .. i .. "," .. i2]
-							if not hiveCell.CellLocked.Value and not hiveCell:FindFirstChild("Faceplate") then
+							local hiveCell = cells:FindFirstChild("C" .. i .. "," .. i2)
+							local lock = hiveCell and hiveCell:FindFirstChild("CellLocked")
+							if lock and not lock.Value and not hiveCell:FindFirstChild("Faceplate") then
 								hasEmptyCell = true
 								break
 							end
